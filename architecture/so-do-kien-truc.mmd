@@ -1,0 +1,63 @@
+flowchart LR
+  U["👤 Nhân viên (2.000 DAU)<br/>Web app / Teams / Gmail add-in"]
+  IDP["IdP tập đoàn - Entra ID / Google<br/>OIDC + MFA<br/><b>[authn]</b>"]
+
+  subgraph EDGE["Biên mạng"]
+    WAF["Cloud Armor WAF<br/><b>[network]</b>"]
+    LB["Global HTTPS Load Balancer<br/>TLS, health check, multi-zone<br/><b>[load_balancer]</b>"]
+  end
+
+  subgraph GCP["GCP asia-southeast1 Singapore - VPC riêng, subnet private <b>[network]</b>"]
+    subgraph GKE["GKE regional prod - 3 zone a/b/c <b>[compute]</b>"]
+      API["Web/API + Orchestrator agent<br/><b>[compute]</b>"]
+      OPA["Policy engine OPA<br/>RBAC/ABAC, ACL, quota<br/><b>[authz]</b>"]
+      GR["Guardrail + DLP<br/>Model Armor / Presidio, eval gate<br/><b>[governance]</b>"]
+      GW["LLM Gateway LiteLLM<br/>routing nhỏ/lớn, quota, fallback, log token<br/><b>[gateway]</b>"]
+      CW["Connector workers<br/>OAuth ủy nhiệm theo user<br/><b>[connectors]</b>"]
+      SB["Sandbox node pool - GKE Sandbox gVisor<br/>không egress, chặn metadata, CPU/RAM/timeout<br/><b>[sandbox]</b>"]
+    end
+    Q["Memorystore Redis HA + Cloud Tasks/PubSub<br/>cache phiên, hàng đợi agent<br/><b>[cache_queue]</b>"]
+    DB["Cloud SQL PostgreSQL HA primary+standby<br/>user, quyền, lịch sử chat, bộ nhớ<br/><b>[database]</b>"]
+    VDB["pgvector trong Cloud SQL<br/>lọc theo user_id + ACL gốc<br/><b>[vector_db]</b>"]
+    GCS["Cloud Storage - workspace riêng<br/>prefix/user + CMEK, quota 10 GB<br/><b>[object_storage]</b>"]
+    KMS["Secret Manager + Cloud KMS<br/>token vault OAuth, xoay khóa<br/><b>[secrets_kms]</b>"]
+    NAT["Cloud NAT - egress có kiểm soát<br/><b>[network]</b>"]
+    PSC["Private Service Connect<br/>endpoint vùng<br/><b>[network]</b>"]
+  end
+
+  subgraph AI["Vertex AI asia-southeast1 - không dùng dữ liệu để huấn luyện"]
+    LLM["Model nhỏ + model lớn + sinh ảnh<br/><b>[llm]</b>"]
+    EMB["Embedding<br/><b>[embedding]</b>"]
+  end
+
+  SAAS["Google Workspace, M365/Outlook/Teams,<br/>Notion, Jira, Confluence"]
+
+  subgraph OPS["Vận hành"]
+    MON["Cloud Logging + Monitoring + Prometheus<br/>audit log 12 tháng, token theo user/đơn vị, cảnh báo ngân sách<br/><b>[monitoring]</b>"]
+    CICD["Cloud Build + Artifact Registry + Terraform<br/>cụm GKE staging zonal<br/><b>[cicd]</b>"]
+    FTE["1 SRE + 0.5 MLOps<br/><b>[ops_labor]</b>"]
+  end
+
+  subgraph DR["DR asia-southeast3 Bangkok <b>[backup_dr]</b>"]
+    REP["Cloud SQL read replica<br/>RPO vài giây"]
+    BK["GCS Nearline: bản sao workspace<br/>RTO 4h bằng Terraform"]
+  end
+
+  U -- "1 đăng nhập SSO" --> IDP
+  U -- "2 HTTPS" --> WAF --> LB --> API
+  API -- "3 kiểm quyền" --> OPA
+  API -- "4 lọc vào/ra" --> GR
+  API -- "5 RAG" --> VDB
+  VDB --- DB
+  API -- "5 dữ liệu thật" --> CW
+  CW -- "lấy token" --> KMS
+  CW --> NAT --> SAAS
+  API -- "6 gọi model" --> GW --> PSC --> LLM
+  PSC --> EMB
+  API -- "7 chạy code" --> SB
+  SB -- "chỉ workspace của user" --> GCS
+  API -- "10 tác vụ nền" --> Q
+  API --> GCS
+  API -. "9 log, audit" .-> MON
+  DB -. replica .-> REP
+  GCS -. sao chép .-> BK
